@@ -2,12 +2,14 @@ package me.infin1te.aei;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import javax.annotation.Nonnull;
 
@@ -49,6 +51,9 @@ public class RecipeExport implements IModPlugin {
         jeiRuntime = runtime;
         LOGGER.info("AEI: JEI runtime is available for manual recipe export");
     }
+        public static IJeiRuntime getJeiRuntime() {
+            return jeiRuntime;
+        }
 
     public static boolean exportRecipesAsync() {
         IJeiRuntime runtime = jeiRuntime;
@@ -121,7 +126,6 @@ public class RecipeExport implements IModPlugin {
     ) throws IOException {
         JsonWriter jsonWriter = Objects.requireNonNull(json, "json");
         IRecipeCategory<T> category = manager.getRecipeCategory(type);
-
         List<T> recipes =
                 manager.createRecipeLookup(type)
                         .includeHidden()
@@ -164,9 +168,8 @@ public class RecipeExport implements IModPlugin {
                 jsonWriter.name("ingredients").beginArray();
 
                 for (ITypedIngredient<?> typed : slot.getAllIngredients().toList()) {
-                    Object ingredient = typed.getIngredient();
-                    if (ingredient != null) {
-                        writeIngredient(ingredient, jsonWriter);
+                    if (typed.getIngredient() != null) {
+                        writeIngredient(typed, jsonWriter);
                     }
                 }
 
@@ -180,44 +183,92 @@ public class RecipeExport implements IModPlugin {
     }
 
     @SuppressWarnings("null")
-    private static void writeIngredient(Object ingredient, @Nonnull JsonWriter json) throws IOException {
+    private static void writeIngredient(ITypedIngredient<?> typed, @Nonnull JsonWriter json) throws IOException {
         Objects.requireNonNull(json, "json");
+        Object ingredient = typed.getIngredient();
 
         if (ingredient instanceof ItemStack stack) {
             ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
-            if (id == null) {
-                return;
-            }
+            if (id == null) return;
 
             json.beginObject();
-            json.name("item").value(id.toString());
+            json.name("type").value("item");
+            json.name("id").value(id.toString());
             json.name("count").value(stack.getCount());
-
             var tag = stack.getTag();
-            if (tag != null) {
-                json.name("nbt").value(tag.toString());
-            }
-
+            if (tag != null) json.name("nbt").value(tag.toString());
             json.endObject();
             return;
         }
 
         if (ingredient instanceof FluidStack fluid) {
             ResourceLocation id = ForgeRegistries.FLUIDS.getKey(fluid.getFluid());
-            if (id == null) {
-                return;
-            }
+            if (id == null) return;
 
             json.beginObject();
-            json.name("fluid").value(id.toString());
+            json.name("type").value("fluid");
+            json.name("id").value(id.toString());
             json.name("amount").value(fluid.getAmount());
             json.endObject();
             return;
         }
 
-        // fallback for unknown types
+        // Generic reflection-based handler for modded ingredient types
+        // (Mekanism GasStack, InfusionStack, PigmentStack, SlurryStack, etc.)
+        // These all share the pattern: getType().getRegistryName() + getAmount()
+        String typeUid = typed.getType().getUid().toString();
+        Optional<ResourceLocation> registryKey = tryGetRegistryName(ingredient);
+        if (registryKey.isPresent()) {
+            json.beginObject();
+            json.name("type").value(typeUid.toString());
+            json.name("id").value(registryKey.get().toString());
+            OptionalLong amount = tryGetAmount(ingredient);
+            if (amount.isPresent()) json.name("amount").value(amount.getAsLong());
+            json.endObject();
+            return;
+        }
+
+        // Last-resort fallback: at least record the JEI type and toString
         json.beginObject();
-        json.name("unknown").value(String.valueOf(ingredient));
+        json.name("type").value(typeUid.toString());
+        json.name("raw").value(String.valueOf(ingredient));
         json.endObject();
+    }
+
+    /**
+     * Tries ingredient.getType().getRegistryName() — the standard pattern for Forge
+     * registry entries (Mekanism chemicals, etc.).
+     */
+    private static Optional<ResourceLocation> tryGetRegistryName(Object ingredient) {
+        try {
+            Method getType = ingredient.getClass().getMethod("getType");
+            Object chemType = getType.invoke(ingredient);
+            if (chemType == null) return Optional.empty();
+
+            // ForgeRegistryEntry path: getRegistryName()
+            try {
+                Method grn = chemType.getClass().getMethod("getRegistryName");
+                Object result = grn.invoke(chemType);
+                if (result instanceof ResourceLocation rl) return Optional.of(rl);
+            } catch (NoSuchMethodException ignored) {}
+
+            // Fallback: getName() returning ResourceLocation (some Mekanism internals)
+            try {
+                Method getName = chemType.getClass().getMethod("getName");
+                Object result = getName.invoke(chemType);
+                if (result instanceof ResourceLocation rl) return Optional.of(rl);
+            } catch (NoSuchMethodException ignored) {}
+        } catch (Exception ignored) {}
+        return Optional.empty();
+    }
+
+    /** Tries ingredient.getAmount() — works for GasStack, InfusionStack, FluidStack, etc. */
+    private static OptionalLong tryGetAmount(Object ingredient) {
+        try {
+            Method m = ingredient.getClass().getMethod("getAmount");
+            Object val = m.invoke(ingredient);
+            if (val instanceof Number n) return OptionalLong.of(n.longValue());
+        } catch (Exception ignored) {}
+        return OptionalLong.empty();
     }
 }
