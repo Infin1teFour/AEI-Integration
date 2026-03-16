@@ -25,6 +25,8 @@ public final class AeiPackageBuilder {
         Path exportDir = Path.of("AEIExport");
         Path translations = exportDir.resolve("translations.json");
         Path recipes = exportDir.resolve("recipes.json");
+        Path recipeManifest = exportDir.resolve("recipes_manifest.json");
+        Path recipeChunks = exportDir.resolve("recipes_by_type");
         Path inventoryImages = exportDir.resolve("inventory_images");
 
         if (!Files.exists(translations)) {
@@ -45,6 +47,12 @@ public final class AeiPackageBuilder {
 
             addFile(zipOut, translations, "translations.json");
             addFile(zipOut, recipes, "recipes.json");
+            if (Files.exists(recipeManifest)) {
+                addFile(zipOut, recipeManifest, "recipes_manifest.json");
+            }
+            if (Files.isDirectory(recipeChunks)) {
+                addDirectory(zipOut, recipeChunks, "recipes_by_type");
+            }
             addDirectory(zipOut, inventoryImages, "assets/inventory_images");
         }
 
